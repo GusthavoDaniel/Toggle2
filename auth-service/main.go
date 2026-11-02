@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/jackc/pgx/v4/stdlib" // O underline garante o registro do driver e impede a limpeza do goimports
@@ -20,6 +23,9 @@ type App struct {
 func main() {
 	// Carrega o .env para desenvolvimento local. Em produção, isso não fará nada.
 	_ = godotenv.Load()
+
+	// --- OpenTelemetry (traces -> OTel Collector -> Datadog) ---
+	shutdownTracing := initTracing(context.Background())
 
 	// --- Configuração ---
 	port := os.Getenv("PORT")
@@ -67,15 +73,24 @@ func main() {
 	// #nosec G102 -- serviço roda em container; precisa escutar em todas as interfaces para ser alcançável na rede docker/k8s
 	srv := &http.Server{
 		Addr:         ":" + port,
-		Handler:      mux,
+		Handler:      newHTTPHandler(mux, "auth-service"),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// O Kubernetes envia SIGTERM ao encerrar o Pod.
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	log.Printf("Serviço de Autenticação (Go) rodando na porta %s", port)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatal(err)
+	serveErr := serveUntilSignal(sigCtx, srv)
+
+	// Exporta os últimos spans. Fica fora de defer porque log.Fatal não executa defers.
+	flushTracing(shutdownTracing)
+
+	if serveErr != nil {
+		log.Fatal(serveErr)
 	}
 }
 

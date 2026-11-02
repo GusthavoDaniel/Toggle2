@@ -10,6 +10,11 @@ import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 from dotenv import load_dotenv
 from flask import Flask, jsonify
+from opentelemetry import context as otel_context
+from opentelemetry import propagate, trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
+
+tracer = trace.get_tracer("analytics-service")
 
 # Configura o logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -48,7 +53,35 @@ except Exception as e:  # noqa: BLE001 - falha fatal de inicialização, precisa
 # --- SQS Worker ---
 
 def process_message(message):
-    """ Processa uma única mensagem SQS e a insere no DynamoDB """
+    """ Processa uma única mensagem SQS e a insere no DynamoDB.
+
+    O contexto de trace (traceparent) vem nos MessageAttributes, injetado pelo
+    evaluation-service; assim o span de consumo entra no mesmo trace. """
+    carrier = {
+        k: v.get('StringValue')
+        for k, v in (message.get('MessageAttributes') or {}).items()
+        if v.get('StringValue') is not None
+    }
+    parent_ctx = propagate.extract(carrier)
+    token = otel_context.attach(parent_ctx)
+    try:
+        with tracer.start_as_current_span("sqs.process", kind=SpanKind.CONSUMER) as span:
+            span.set_attribute("messaging.system", "aws_sqs")
+            span.set_attribute("messaging.message.id", message.get('MessageId', ''))
+            _process_message(message)
+    finally:
+        otel_context.detach(token)
+
+
+def _mark_span_error(exc):
+    """ Marca o span atual como falho. Necessário porque _process_message trata
+    as exceções sem relançá-las: sem isto o span sairia como sucesso. """
+    span = trace.get_current_span()
+    span.record_exception(exc)
+    span.set_status(Status(StatusCode.ERROR, str(exc)))
+
+
+def _process_message(message):
     try:
         log.info(f"Processando mensagem ID: {message['MessageId']}")
         body = json.loads(message['Body'])
@@ -79,14 +112,17 @@ def process_message(message):
             ReceiptHandle=message['ReceiptHandle']
         )
         
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
         log.error(f"Erro ao decodificar JSON da mensagem ID: {message['MessageId']}")
+        _mark_span_error(e)
         # Não deleta a mensagem, pode ser uma "poison pill"
     except ClientError as e:
         log.error(f"Erro do Boto3 (DynamoDB ou SQS) ao processar {message['MessageId']}: {e}")
+        _mark_span_error(e)
         # Não deleta a mensagem, tenta novamente
     except Exception as e:  # noqa: BLE001 - worker não pode morrer por erro inesperado; mensagem volta pra fila
         log.error(f"Erro inesperado ao processar {message['MessageId']}: {e}")
+        _mark_span_error(e)
         # Não deleta a mensagem, tenta novamente
 
 def sqs_worker_loop():
@@ -98,7 +134,8 @@ def sqs_worker_loop():
             response = sqs_client.receive_message(
                 QueueUrl=SQS_QUEUE_URL,
                 MaxNumberOfMessages=10,  # Processa em lotes de até 10
-                WaitTimeSeconds=20
+                WaitTimeSeconds=20,
+                MessageAttributeNames=["All"],  # traz o traceparent do produtor
             )
             
             messages = response.get('Messages', [])

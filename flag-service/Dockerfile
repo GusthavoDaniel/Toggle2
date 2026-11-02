@@ -44,4 +44,6 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:8002/health || exit 1
 
 # 2 workers: serviço CRUD simples, não é o hot path do sistema.
-CMD ["gunicorn", "--bind", "0.0.0.0:8002", "--workers", "2", "app:app"]
+# opentelemetry-instrument ativa a auto-instrumentação (Flask, requests, ...).
+# Configuração via OTEL_* (OTEL_SERVICE_NAME, OTEL_EXPORTER_OTLP_ENDPOINT, ...).
+CMD ["opentelemetry-instrument", "gunicorn", "--bind", "0.0.0.0:8002", "--workers", "2", "app:app"]

@@ -37,4 +37,6 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
 # Com 1 worker, garantimos um único consumidor por Pod -- o que é o
 # comportamento esperado, já que a escalabilidade real deste serviço
 # acontece via réplicas de Pods (HPA/KEDA), não via processos gunicorn.
-CMD ["gunicorn", "--bind", "0.0.0.0:8005", "--workers", "1", "--timeout", "120", "app:app"]
+# opentelemetry-instrument ativa a auto-instrumentação (Flask, requests, ...).
+# Configuração via OTEL_* (OTEL_SERVICE_NAME, OTEL_EXPORTER_OTLP_ENDPOINT, ...).
+CMD ["opentelemetry-instrument", "gunicorn", "--bind", "0.0.0.0:8005", "--workers", "1", "--timeout", "120", "app:app"]
