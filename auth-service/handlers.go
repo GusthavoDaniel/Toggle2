@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -48,6 +50,11 @@ func (a *App) validateKeyHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Se não encontrar (sql.ErrNoRows), ou qualquer outro erro, a chave é inválida
 		log.Printf("Falha na validação da chave (hash: %s...): %v", keyHash[:6], err)
+		// Chave inexistente é resposta normal; só falha de banco marca o span,
+		// pois o otelhttp não trata este 401 como erro do servidor.
+		if !errors.Is(err, sql.ErrNoRows) {
+			markSpanError(r.Context(), err)
+		}
 		http.Error(w, "Chave de API inválida ou inativa", http.StatusUnauthorized)
 		return
 	}
@@ -80,6 +87,7 @@ func (a *App) createKeyHandler(w http.ResponseWriter, r *http.Request) {
 	// Gera uma nova chave e seu hash
 	newKey, err := generateAPIKey()
 	if err != nil {
+		markSpanError(r.Context(), err)
 		http.Error(w, "Erro ao gerar a chave", http.StatusInternalServerError)
 		return
 	}
@@ -94,6 +102,7 @@ func (a *App) createKeyHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		log.Printf("Erro ao salvar a chave no banco: %v", err)
+		markSpanError(r.Context(), err)
 		http.Error(w, "Erro ao salvar a chave", http.StatusInternalServerError)
 		return
 	}

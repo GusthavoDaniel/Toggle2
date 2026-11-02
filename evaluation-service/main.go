@@ -5,6 +5,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -12,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Contexto global para o Redis
@@ -25,10 +29,17 @@ type App struct {
 	HttpClient          *http.Client
 	FlagServiceURL      string
 	TargetingServiceURL string
+
+	// events acompanha os envios ao SQS em andamento, que rodam em goroutines
+	// e que srv.Shutdown não enxerga.
+	events sync.WaitGroup
 }
 
 func main() {
 	_ = godotenv.Load() // Carrega .env para dev local
+
+	// --- OpenTelemetry (traces -> OTel Collector -> Datadog) ---
+	shutdownTracing := initTracing(context.Background())
 
 	// --- Configuração ---
 	port := os.Getenv("PORT")
@@ -86,8 +97,11 @@ func main() {
 	}
 
 	// Cliente HTTP (com timeout)
+	// otelhttp.NewTransport cria um span por chamada e injeta o header
+	// traceparent, ligando evaluation -> flag/targeting no trace.
 	httpClient := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout:   5 * time.Second,
+		Transport: otelhttp.NewTransport(http.DefaultTransport),
 	}
 
 	// Cria a instância da App
@@ -108,14 +122,25 @@ func main() {
 	// #nosec G102 -- serviço roda em container; precisa escutar em todas as interfaces para ser alcançável na rede docker/k8s
 	srv := &http.Server{
 		Addr:         ":" + port,
-		Handler:      mux,
+		Handler:      newHTTPHandler(mux, "evaluation-service"),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// O Kubernetes envia SIGTERM ao encerrar o Pod.
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	log.Printf("Serviço de Avaliação (Go) rodando na porta %s", port)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatal(err)
+	serveErr := serveUntilSignal(sigCtx, srv)
+
+	// A ordem importa: primeiro os eventos terminam (e fecham seus spans),
+	// depois os spans são exportados. Fora de defer porque log.Fatal não executa defers.
+	waitWithTimeout(&app.events, eventsDrainTimeout)
+	flushTracing(shutdownTracing)
+
+	if serveErr != nil {
+		log.Fatal(serveErr)
 	}
 }
