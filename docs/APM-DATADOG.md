@@ -99,12 +99,16 @@ kubectl rollout restart deployment/otel-collector -n observability
 
 Se a chave for trocada, atualizar o Secret e reiniciar o Collector. Ao reiniciar, o log deve mostrar `API key validation successful`.
 
-## 5. Ordem de merge do PR #9
+## 5. Merge do PR #9 (FEITO em 02/11, commit `23a8042`)
+
+O merge foi feito antes de o cluster estar pronto, porque ninguém do grupo tinha começado a editar o GitOps (sem risco de conflito). Resultado: os 5 workflows da `main` ficaram verdes, as imagens foram publicadas no ECR da conta `186107385777` com a tag igual ao SHA do commit, e o bot atualizou a linha `image:` dos `deployment.yaml` em `togglemaster-gitops`. Isso também trocou o registry antigo (conta da Fase 3) pelo atual.
+
+Ordem original prevista, mantida como referência dos pré-requisitos para os serviços funcionarem:
 
 1. Cluster EKS e ArgoCD rodando, com os Deployments e Services dos 5 serviços no GitOps.
 2. Variáveis `OTEL_*` nos Deployments (seção 3) e Collector oficial no ar (seção 4).
-3. Só então fazer merge do PR #9 em `main` do `LuSntgo/Toggle2`.
-4. O merge dispara o CI: build, scan, push das imagens no ECR e atualização da imagem em `togglemaster-gitops` pelo bot. **O primeiro merge é o teste real dos jobs de imagem e GitOps.**
+3. Merge do PR #9 em `main` do `LuSntgo/Toggle2` (feito).
+4. Cada push na `main` dispara o CI: build, scan, push das imagens no ECR e atualização da imagem em `togglemaster-gitops` pelo bot. Os jobs de imagem e GitOps foram validados no merge do PR #9.
 
 Pontos de atenção do CI:
 - Login no ECR com chaves AWS estáticas, guardadas como secrets do repositório `LuSntgo/Toggle2` (usuário IAM `luiza_fiap`, da conta de laboratório). Se a pessoa que mantém essas chaves não estiver disponível, outra pessoa precisa criar novas e atualizar os secrets.
